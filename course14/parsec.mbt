@@ -8,7 +8,7 @@ fn pchar(predicate : (Char) -> Bool) -> Lexer[Char] {
   Lexer(
     fn(input) {
       if input.length() > 0 && predicate(input[0]) {
-        Some((input[0], input.substring(start=1)))
+        Some((input[0], input.to_bytes().sub_string(2, input.length() - 2)))
       } else {
         None
       }
@@ -46,20 +46,42 @@ fn or[Value](self : Lexer[Value], parser2 : Lexer[Value]) -> Lexer[Value] {
   )
 }
 
+fn reverse_list[X](list : List[X]) -> List[X] {
+  fn go(acc, xs : List[X]) {
+    match xs {
+      Nil => acc
+      Cons(x, rest) => go((Cons(x, acc) : List[X]), rest)
+    }
+  }
+
+  go(Nil, list)
+}
+
+fn fold_left_list[A, B](list : List[A], f : (B, A) -> B, b : B) -> B {
+  match list {
+    Nil => b
+    Cons(hd, tl) => fold_left_list(tl, f, f(b, hd))
+  }
+}
+
 fn many[Value](self : Lexer[Value]) -> Lexer[List[Value]] {
   Lexer(
     fn(input) {
-      loop input, List::Nil {
-        rest, cumul => match self.parse(rest) {
-          None => Some((cumul.reverse(), rest))
-          Some((value, rest)) => continue rest, Cons(value, cumul)
+      let mut rest = input
+      let mut cumul = List::Nil
+      while true {
+        match self.parse(rest) {
+          None => break
+          Some((value, new_rest)) => {
+            rest = new_rest
+            cumul = Cons(value, cumul)
+          }
         }
       }
+      Some((reverse_list(cumul), rest))
     },
   )
 }
-
-
 
 /// Number = %x30 / (%x31-39) *(%x30-39)  
 /// LParen = "("  
@@ -86,12 +108,12 @@ let symbol : Lexer[Token] = pchar(
   },
 ).map(
   fn {
-    '+' => Token::Plus
-    '-' => Token::Minus
-    '*' => Token::Multiply
-    '/' => Token::Divide
-    '(' => Token::LParen
-    ')' => Token::RParen
+    '+' => Plus
+    '-' => Minus
+    '*' => Multiply
+    '/' => Divide
+    '(' => LParen
+    ')' => RParen
   },
 )
 
@@ -109,7 +131,7 @@ let zero_to_nine : Lexer[Int] = pchar(
 
 let value : Lexer[Token] = zero.or(
   one_to_nine.and(zero_to_nine.many()).map(
-    fn { (i, ls) => ls.fold_left(fn { i, j => i * 10 + j }, init=i) },
+    fn { (i, ls) => fold_left_list(ls, fn { i, j => i * 10 + j }, i) },
   ),
 ).map(Token::Value)
 
@@ -117,18 +139,21 @@ let tokens : Lexer[List[Token]] = value.or(symbol).and(whitespace.many()).map(
   fn { (symbols, _) => symbols },
 ).many()
 
+fn aux(show: Show) -> Unit {
+  println(show.to_string())
+}
+
 test "Lexing" {
-  inspect(tokens.parse("-10123+-+523 103    ( 5) )  "), content="Some((List::[Minus, Value(10123), Plus, Minus, Plus, Value(523), Value(103), LParen, Value(5), RParen, RParen], ))")?
-  inspect(pchar(fn { ch => ch == 'a' }).parse("asdf"), content="Some((a, sdf))")?
-  inspect(
+  aux(tokens.parse("-10123+-+523 103    ( 5) )  ")) |> debug
+  aux(pchar(fn { ch => ch == 'a' }).parse("asdf")) |> debug
+  aux(
     pchar(
       fn {
         'a' => true
         _ => false
       },
     ).parse("sdf"),
-    content="None",
-  )?
+  ) |> debug
 }
 
 /// atomic = Value / LParen expression RParen  
@@ -140,7 +165,7 @@ enum Expression {
   Minus(Expression, Expression)
   Multiply(Expression, Expression)
   Divide(Expression, Expression)
-} derive(Debug, Show)
+} derive(Debug)
 
 type Parser[V] (List[Token]) -> Option[(V, List[Token])]
 
@@ -195,12 +220,18 @@ fn or[Value](self : Parser[Value], parser2 : Parser[Value]) -> Parser[Value] {
 fn many[Value](self : Parser[Value]) -> Parser[List[Value]] {
   Parser(
     fn(input) {
-      loop input, List::Nil {
-        rest, cumul => match self.parse(rest) {
-          None => Some((cumul.reverse(), rest))
-          Some((value, rest)) => continue rest, Cons(value, cumul)
+      let mut i = input
+      let mut cumul = List::Nil
+      while true {
+        match self.parse(i) {
+          None => break
+          Some((value, rest)) => {
+            i = rest
+            cumul = Cons(value, cumul)
+          }
         }
       }
+      Some((reverse_list(cumul), i))
     },
   )
 }
@@ -260,32 +291,33 @@ fn parser() -> Parser[Expression] {
       Value(_) => true
       _ => false
     },
-  ).map(fn { Value(i) => Expression::Number(i) })
+  ).map(fn { Value(i) => Number(i) })
   let automic = lparen.and(ref(expression_ref)).and(rparen).map(
     fn { ((_, expr), _) => expr },
   ).or(number)
   let combine = automic.and(multiply.or(divide).and(automic).many()).map(
     fn {
       (expr, list) =>
-        list.fold_left(
+        fold_left_list(
+          list,
           fn {
             e, (Multiply, expr) => Expression::Multiply(e, expr)
             e, (_, expr) => Expression::Divide(e, expr)
           },
-          init=expr,
+          expr,
         )
     },
   )
-
   expression_ref.val = combine.and(plus.or(minus).and(combine).many()).map(
     fn {
       (expr, list) =>
-        list.fold_left(
+        fold_left_list(
+          list,
           fn {
             e, (Plus, expr) => Expression::Plus(e, expr)
             e, (_, expr) => Expression::Minus(e, expr)
           },
-          init=expr,
+          expr,
         )
     },
   )
@@ -322,7 +354,7 @@ fn Expression::op_div(a : Expression, b : Expression) -> Expression {
 }
 
 // Semantic: compute expression 语义：计算表达式
-type BoxedInt Int derive(Debug, Show)
+type BoxedInt Int derive(Debug)
 
 fn BoxedInt::number(i : Int) -> BoxedInt {
   BoxedInt(i)
@@ -348,7 +380,7 @@ fn BoxedInt::op_div(a : BoxedInt, b : BoxedInt) -> BoxedInt {
 struct BoxedString {
   str : String
   level : Int
-} derive(Debug, Show)
+} derive(Debug)
 
 fn BoxedString::number(i : Int) -> BoxedString {
   { str: i.to_string(), level: 0 }
@@ -397,12 +429,13 @@ fn recursive_parser_with_tagless_final[E : Expr]() -> Parser[E] {
     ).map(
       fn {
         (e, list) =>
-          list.fold_left(
+          fold_left_list(
+            list,
             fn {
               e, (Multiply, expr) => e * expr
               e, (_, expr) => e / expr
             },
-            init=e,
+            e,
           )
       },
     ).parse(tokens)
@@ -414,12 +447,13 @@ fn recursive_parser_with_tagless_final[E : Expr]() -> Parser[E] {
     ).map(
       fn {
         (e, list) =>
-          list.fold_left(
+          fold_left_list(
+            list,
             fn {
               e, (Plus, expr) => e + expr
               e, (_, expr) => e - expr
             },
-            init=e,
+            e,
           )
       },
     ).parse(tokens)
@@ -445,34 +479,20 @@ fn parse_string_tagless_final[E : Expr](
 }
 
 test "Parsing" {
-  inspect(
-    parse_string("1 + 1 * (307 + 7) + 5 - 3 - 2"),
-    content=
-      #|Some((Minus(Minus(Plus(Plus(Number(1), Multiply(Number(1), Plus(Number(307), Number(7)))), Number(5)), Number(3)), Number(2)), , List::[]))
-    ,
-  )?
-  inspect(
+  aux(parse_string("1 + 1 * (307 + 7) + 5 - 3 - 2")) |> debug
+  aux(
     (
       parse_string_tagless_final("1 + 1 * (307 + 7) + 5 - 3 - 2") :
       Option[(Expression, String, List[Token])]),
-    content=
-      #|Some((Minus(Minus(Plus(Plus(Number(1), Multiply(Number(1), Plus(Number(307), Number(7)))), Number(5)), Number(3)), Number(2)), , List::[]))
-    ,
-  )?
-  inspect(
+  ) |> debug
+  aux(
     (
       parse_string_tagless_final("1 + 1 * (307 + 7) + 5 - 3 - 2") :
       Option[(BoxedInt, String, List[Token])]),
-    content=
-      #|Some((BoxedInt(315), , List::[]))
-    ,
-  )?
-  inspect(
+  ) |> debug
+  aux(
     (
       parse_string_tagless_final("1 + 1 * (307 + 7) + 5 - 3 - 2") :
       Option[(BoxedString, String, List[Token])]),
-    content=
-      #|Some(({str: "1 + 1 * (307 + 7) + 5 - 3 - 2", level: 1}, , List::[]))
-    ,
-  )?
+  ) |> debug
 }
